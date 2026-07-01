@@ -32,10 +32,37 @@ class JournalLine:
 
 
 @dataclass(frozen=True)
+class GeneratedTransactionRow:
+    entry_date: str
+    memo: str
+    debit_account: str
+    credit_account: str
+    debit_amount: float
+    credit_amount: float
+    source: str
+    source_id: str
+
+
+@dataclass(frozen=True)
 class PostingSummary:
     posted: int
     skipped: int
     total_unposted: int
+
+
+@dataclass(frozen=True)
+class ProposalSummary:
+    proposed: int
+    skipped: int
+    total_unproposed: int
+
+
+@dataclass(frozen=True)
+class LedgerPostSummary:
+    posted: int
+    skipped: int
+    total_proposals: int
+
 
 class Account:
     pass

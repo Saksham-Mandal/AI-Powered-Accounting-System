@@ -9,23 +9,28 @@ ACCOUNTS = [
     ("1000", "Cash", "asset", "debit"),
     ("1010", "Etsy Clearing", "asset", "debit"),
     ("1100", "Accounts Receivable", "asset", "debit"),
-    ("1200", "Inventory", "asset", "debit"),
+    ("1200", "Materials", "asset", "debit"),
     ("1300", "Supplies", "asset", "debit"),
     ("2000", "Accounts Payable", "liability", "credit"),
-    ("2100", "Sales Tax Payable", "liability", "credit"),
-    ("3000", "Owner Capital", "equity", "credit"),
-    ("3100", "Owner Contributions", "equity", "credit"),
-    ("3200", "Owner Draws", "equity", "debit"),
+    ("3000", "Capital", "equity", "credit"),
+    ("3900", "Income Summary", "equity", "credit"),
     ("4000", "Sales Revenue", "revenue", "credit"),
     ("4050", "Sales Returns and Allowances", "contra_revenue", "debit"),
-    ("4100", "Shipping Revenue", "revenue", "credit"),
-    ("5000", "Cost of Goods Sold", "expense", "debit"),
     ("5100", "Etsy Fees Expense", "expense", "debit"),
+    ("5150", "Sales Tax Expense", "expense", "debit"),
     ("5200", "Shipping Expense", "expense", "debit"),
     ("5300", "Materials Expense", "expense", "debit"),
-    ("5400", "Marketing Expense", "expense", "debit"),
-    ("5500", "Software Expense", "expense", "debit"),
+    ("5400", "Supplies Expense", "expense", "debit"),
+    ("5500", "Marketing Expense", "expense", "debit"),
+    ("5600", "Software Expense", "expense", "debit"),
     ("5900", "Uncategorized Expense", "expense", "debit"),
+]
+REMOVED_ACCOUNT_CODES = [
+    "2100",
+    "3100",
+    "3200",
+    "4100",
+    "5000",
 ]
 
 
@@ -51,6 +56,7 @@ def seed_accounts(db_path: str | Path = DEFAULT_DB_PATH) -> int:
             """,
             ACCOUNTS,
         )
+        deactivate_removed_accounts(conn)
 
     return len(ACCOUNTS)
 
@@ -68,6 +74,18 @@ def ensure_accounts_table(conn: sqlite3.Connection) -> None:
             created_at TEXT DEFAULT CURRENT_TIMESTAMP
         )
         """
+    )
+
+
+def deactivate_removed_accounts(conn: sqlite3.Connection) -> None:
+    placeholders = ", ".join("?" for _ in REMOVED_ACCOUNT_CODES)
+    conn.execute(
+        f"""
+        UPDATE accounts
+        SET is_active = 0
+        WHERE code IN ({placeholders})
+        """,
+        REMOVED_ACCOUNT_CODES,
     )
 
 

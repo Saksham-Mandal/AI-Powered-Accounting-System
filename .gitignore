@@ -9,6 +9,8 @@ __pycache__/
 # Local database and real import files
 backend/db/accounting.db
 backend/*.csv
+backend/csv_files/*.csv
+!backend/csv_files/Variable Non-Etsy Expense Estimate - Sheet1.csv
 
 # Frontend
 frontend/node_modules/
