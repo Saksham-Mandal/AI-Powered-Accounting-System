@@ -13,6 +13,7 @@ DEFAULT_DB_PATH = BASE_DIR / "db" / "accounting.db"
 CASH = "1000"
 ETSY_CLEARING = "1010"
 SALES_TAX_EXPENSE = "5150"
+MARKETING_EXPENSE = "5500"
 MATERIALS_EXPENSE = "5300"
 SUPPLIES_EXPENSE = "5400"
 UNCATEGORIZED_EXPENSE = "5900"
@@ -27,8 +28,10 @@ KNOWN_TRANSACTION_TYPES = {
     "Sale",
     "Shipping",
     "Materials Expense",
+    "Marketing",
     "Supplies Expense",
     "Tax",
+    "VAT",
 }
 
 
@@ -521,17 +524,20 @@ def build_journal_lines(transaction: sqlite3.Row) -> list[JournalLine]:
     if transaction_type == "Shipping":
         return build_expense_or_credit_lines("5200", net, amount, memo)
 
+    if transaction_type == "Marketing":
+        return build_expense_or_credit_lines(MARKETING_EXPENSE, net, amount, memo)
+
     if transaction_type == "Materials Expense":
         return build_cash_expense_lines(MATERIALS_EXPENSE, net, amount, memo)
 
     if transaction_type == "Supplies Expense":
         return build_cash_expense_lines(SUPPLIES_EXPENSE, net, amount, memo)
 
-    if transaction_type == "Tax":
+    if transaction_type in {"Tax", "VAT"}:
         return build_tax_lines(net, amount, memo)
 
-    if is_refund_shortfall_payment(transaction):
-        return build_refund_shortfall_payment_lines(net, amount, memo)
+    if transaction_type == "Payment":
+        return build_payment_lines(net, amount, memo)
 
     return build_expense_or_credit_lines(UNCATEGORIZED_EXPENSE, net, amount, memo)
 
@@ -623,7 +629,7 @@ def build_tax_lines(net: float, amount: float, memo: str) -> list[JournalLine]:
     ]
 
 
-def build_refund_shortfall_payment_lines(
+def build_payment_lines(
     net: float,
     amount: float,
     memo: str,
@@ -937,9 +943,7 @@ def get_review_flag(
     transaction_type = transaction["type"]
     reasons = []
 
-    if transaction_type not in KNOWN_TRANSACTION_TYPES or (
-        transaction_type == "Payment" and not is_refund_shortfall_payment(transaction)
-    ):
+    if transaction_type not in KNOWN_TRANSACTION_TYPES:
         reasons.append(
             f"Unknown Etsy transaction type '{transaction_type}' was posted to Uncategorized Expense."
         )
@@ -959,13 +963,6 @@ def get_line_review_flag(lines: list[JournalLine]) -> str:
         return UNCATEGORIZED_REVIEW_REASON
 
     return ""
-
-
-def is_refund_shortfall_payment(transaction: sqlite3.Row) -> bool:
-    transaction_type = transaction["type"]
-    title = (transaction["title"] or "").strip().lower()
-
-    return transaction_type == "Payment" and title.startswith("charge for refund")
 
 
 def get_account_ids(conn: sqlite3.Connection) -> dict[str, int]:

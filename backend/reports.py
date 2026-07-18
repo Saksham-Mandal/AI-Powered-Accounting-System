@@ -425,6 +425,231 @@ def get_balance_sheet(
     }
 
 
+def save_balance_sheet_snapshot(
+    period_id: int,
+    as_of_date: str,
+    db_path: str | Path = DEFAULT_DB_PATH,
+) -> dict[str, Any]:
+    balance_sheet = get_balance_sheet(as_of_date, db_path=db_path)
+    totals = balance_sheet["totals"]
+
+    with sqlite3.connect(db_path) as conn:
+        conn.row_factory = sqlite3.Row
+        ensure_balance_sheet_snapshot_tables(conn)
+        balances = get_account_balances(db_path, end_date=as_of_date)
+        permanent_accounts = [
+            account
+            for account in balances
+            if account["account_type"] in {"asset", "liability", "equity"}
+            and account["account_code"] != "3900"
+        ]
+        cursor = conn.execute(
+            """
+            INSERT INTO balance_sheet_snapshots (
+                period_id,
+                as_of_date,
+                total_assets,
+                total_liabilities,
+                total_equity,
+                total_liabilities_and_equity,
+                is_balanced,
+                statement_json
+            )
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(period_id) DO UPDATE SET
+                as_of_date = excluded.as_of_date,
+                total_assets = excluded.total_assets,
+                total_liabilities = excluded.total_liabilities,
+                total_equity = excluded.total_equity,
+                total_liabilities_and_equity = excluded.total_liabilities_and_equity,
+                is_balanced = excluded.is_balanced,
+                statement_json = excluded.statement_json,
+                created_at = CURRENT_TIMESTAMP
+            """,
+            (
+                period_id,
+                as_of_date,
+                totals["total_assets"],
+                totals["total_liabilities"],
+                totals["total_equity"],
+                totals["total_liabilities_and_equity"],
+                int(balance_sheet["is_balanced"]),
+                json.dumps(balance_sheet),
+            ),
+        )
+        snapshot_id = cursor.lastrowid
+
+        if not snapshot_id:
+            snapshot_id = conn.execute(
+                """
+                SELECT id
+                FROM balance_sheet_snapshots
+                WHERE period_id = ?
+                LIMIT 1
+                """,
+                (period_id,),
+            ).fetchone()["id"]
+
+        conn.execute(
+            """
+            DELETE FROM balance_sheet_snapshot_lines
+            WHERE snapshot_id = ?
+            """,
+            (snapshot_id,),
+        )
+        conn.executemany(
+            """
+            INSERT INTO balance_sheet_snapshot_lines (
+                snapshot_id,
+                account_id,
+                account_code,
+                account_name,
+                account_type,
+                section,
+                normal_balance,
+                amount,
+                line_order
+            )
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            [
+                (
+                    snapshot_id,
+                    account["account_id"],
+                    account["account_code"],
+                    account["account_name"],
+                    account["account_type"],
+                    get_balance_sheet_section(account["account_type"]),
+                    account["normal_balance"],
+                    account["statement_amount"],
+                    index,
+                )
+                for index, account in enumerate(permanent_accounts, start=1)
+            ],
+        )
+
+    return balance_sheet
+
+
+def get_latest_balance_sheet_snapshot(
+    db_path: str | Path = DEFAULT_DB_PATH,
+) -> dict[str, Any] | None:
+    with sqlite3.connect(db_path) as conn:
+        conn.row_factory = sqlite3.Row
+        ensure_balance_sheet_snapshot_tables(conn)
+        snapshot = conn.execute(
+            """
+            SELECT
+                bss.id,
+                bss.period_id,
+                bss.as_of_date,
+                bss.total_assets,
+                bss.total_liabilities,
+                bss.total_equity,
+                bss.total_liabilities_and_equity,
+                bss.is_balanced,
+                bss.statement_json,
+                bss.created_at,
+                ap.label AS period_label
+            FROM balance_sheet_snapshots bss
+            LEFT JOIN accounting_periods ap ON ap.id = bss.period_id
+            ORDER BY bss.as_of_date DESC, bss.id DESC
+            LIMIT 1
+            """
+        ).fetchone()
+
+    if snapshot is None:
+        return None
+
+    statement = json.loads(snapshot["statement_json"])
+    return {
+        "id": snapshot["id"],
+        "periodId": snapshot["period_id"],
+        "periodLabel": snapshot["period_label"],
+        "asOfDate": snapshot["as_of_date"],
+        "totalAssets": snapshot["total_assets"],
+        "totalLiabilities": snapshot["total_liabilities"],
+        "totalEquity": snapshot["total_equity"],
+        "totalLiabilitiesAndEquity": snapshot["total_liabilities_and_equity"],
+        "isBalanced": bool(snapshot["is_balanced"]),
+        "createdAt": snapshot["created_at"],
+        "statement": statement,
+    }
+
+
+def ensure_balance_sheet_snapshot_tables(conn: sqlite3.Connection) -> None:
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS balance_sheet_snapshots (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            period_id INTEGER NOT NULL,
+            as_of_date TEXT NOT NULL,
+            total_assets REAL NOT NULL DEFAULT 0,
+            total_liabilities REAL NOT NULL DEFAULT 0,
+            total_equity REAL NOT NULL DEFAULT 0,
+            total_liabilities_and_equity REAL NOT NULL DEFAULT 0,
+            is_balanced INTEGER NOT NULL DEFAULT 0,
+            statement_json TEXT NOT NULL,
+            created_at TEXT DEFAULT CURRENT_TIMESTAMP,
+            FOREIGN KEY (period_id) REFERENCES accounting_periods(id)
+        )
+        """
+    )
+    conn.execute(
+        """
+        CREATE UNIQUE INDEX IF NOT EXISTS idx_balance_sheet_snapshots_period
+        ON balance_sheet_snapshots(period_id)
+        """
+    )
+    conn.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_balance_sheet_snapshots_as_of_date
+        ON balance_sheet_snapshots(as_of_date)
+        """
+    )
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS balance_sheet_snapshot_lines (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            snapshot_id INTEGER NOT NULL,
+            account_id INTEGER NOT NULL,
+            account_code TEXT NOT NULL,
+            account_name TEXT NOT NULL,
+            account_type TEXT NOT NULL,
+            section TEXT NOT NULL,
+            normal_balance TEXT NOT NULL,
+            amount REAL NOT NULL DEFAULT 0,
+            line_order INTEGER NOT NULL DEFAULT 0,
+            created_at TEXT DEFAULT CURRENT_TIMESTAMP,
+            FOREIGN KEY (snapshot_id) REFERENCES balance_sheet_snapshots(id),
+            FOREIGN KEY (account_id) REFERENCES accounts(id)
+        )
+        """
+    )
+    conn.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_balance_sheet_snapshot_lines_snapshot
+        ON balance_sheet_snapshot_lines(snapshot_id)
+        """
+    )
+    conn.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_balance_sheet_snapshot_lines_account
+        ON balance_sheet_snapshot_lines(account_id)
+        """
+    )
+
+
+def get_balance_sheet_section(account_type: str) -> str:
+    if account_type == "asset":
+        return "assets"
+
+    if account_type == "liability":
+        return "liabilities"
+
+    return "equity"
+
+
 def get_account_balances(
     db_path: str | Path = DEFAULT_DB_PATH,
     start_date: str | None = None,
@@ -457,6 +682,7 @@ def get_account_balances(
         rows = conn.execute(
             f"""
             SELECT
+                a.id AS account_id,
                 a.code AS account_code,
                 a.name AS account_name,
                 a.account_type,
@@ -517,6 +743,7 @@ def format_account_balance(row: sqlite3.Row) -> dict[str, Any]:
         statement_amount = round(credits - debits, 2)
 
     return {
+        "account_id": row["account_id"],
         "account_code": row["account_code"],
         "account_name": row["account_name"],
         "account_type": account_type,

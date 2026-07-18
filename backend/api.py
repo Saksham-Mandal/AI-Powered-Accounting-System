@@ -1,20 +1,22 @@
 import sqlite3
 from calendar import monthrange
-from datetime import date
+from datetime import date, timedelta
 from pathlib import Path
 from typing import Any
 
 from fastapi import FastAPI, File, Form, HTTPException, UploadFile
-from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
 
 try:
+    from .agent.schemas import AgentChatRequest, AgentChatResponse
+    from .agent.service import run_agent_chat
     from .closing_entries import (
         generate_closing_entries,
         get_closing_entry_ids,
         post_closing_entries,
     )
     from .csv_parser import import_etsy_csv_content
+    from .db.cleardb import rollback_period
     from .models import JournalLine
     from .post_transacs import (
         create_manual_proposed_entry,
@@ -27,21 +29,26 @@ try:
         get_balance_sheet,
         get_income_statement,
         get_income_statement_snapshots,
+        get_latest_balance_sheet_snapshot,
         get_trial_balance,
+        save_balance_sheet_snapshot,
         save_income_statement_snapshot,
     )
     from .transaction_csv_parser import import_transaction_csv_content
     from .var_cost import (
-        build_variable_cost_transaction_rows_from_content,
+        build_monthly_variable_cost_transaction_rows_from_content,
         serialize_transaction_csv,
     )
 except ImportError:
+    from agent.schemas import AgentChatRequest, AgentChatResponse
+    from agent.service import run_agent_chat
     from closing_entries import (
         generate_closing_entries,
         get_closing_entry_ids,
         post_closing_entries,
     )
     from csv_parser import import_etsy_csv_content
+    from db.cleardb import rollback_period
     from models import JournalLine
     from post_transacs import (
         create_manual_proposed_entry,
@@ -54,12 +61,14 @@ except ImportError:
         get_balance_sheet,
         get_income_statement,
         get_income_statement_snapshots,
+        get_latest_balance_sheet_snapshot,
         get_trial_balance,
+        save_balance_sheet_snapshot,
         save_income_statement_snapshot,
     )
     from transaction_csv_parser import import_transaction_csv_content
     from var_cost import (
-        build_variable_cost_transaction_rows_from_content,
+        build_monthly_variable_cost_transaction_rows_from_content,
         serialize_transaction_csv,
     )
 
@@ -77,6 +86,7 @@ CURRENT_PERIOD = {
     "period_end": "2026-01-31",
     "label": "January 2026",
 }
+MIN_FINALIZATION_DELAY_DAYS = 14
 MONTH_NAMES = {
     "january": 1,
     "february": 2,
@@ -90,6 +100,10 @@ MONTH_NAMES = {
     "october": 10,
     "november": 11,
     "december": 12,
+}
+MONTH_NAMES_BY_NUMBER = {
+    month_number: month_name.title()
+    for month_name, month_number in MONTH_NAMES.items()
 }
 
 
@@ -165,6 +179,20 @@ def get_accounting_period(period_id: int) -> dict[str, Any]:
         period = get_period_row_by_id(conn, period_id)
 
     return format_period(period)
+
+
+@app.delete("/api/periods/{period_id}/rollback")
+def rollback_accounting_period(period_id: int) -> dict[str, Any]:
+    try:
+        deleted_counts = rollback_period(period_id, DB_PATH)
+    except ValueError as error:
+        raise HTTPException(status_code=404, detail=str(error)) from error
+
+    return {
+        "periodId": deleted_counts["period_id"],
+        "periodLabel": deleted_counts["period_label"],
+        "deleted": deleted_counts,
+    }
 
 
 @app.get("/api/periods/{period_id}/reports/trial-balance")
@@ -249,6 +277,33 @@ def get_balance_sheet_report() -> dict[str, Any]:
     )
 
 
+@app.get("/api/reports/balance-sheet/latest")
+def get_latest_saved_balance_sheet_report() -> dict[str, Any]:
+    snapshot = get_latest_balance_sheet_snapshot(DB_PATH)
+
+    if snapshot is not None:
+        return snapshot
+
+    with get_connection() as conn:
+        ensure_accounting_period(conn)
+        period = get_latest_closed_period_row(conn)
+
+    save_balance_sheet_snapshot(
+        period["id"],
+        period["period_end"],
+        DB_PATH,
+    )
+    snapshot = get_latest_balance_sheet_snapshot(DB_PATH)
+
+    if snapshot is None:
+        raise HTTPException(
+            status_code=404,
+            detail="No saved balance sheet is available yet.",
+        )
+
+    return snapshot
+
+
 @app.get("/api/periods/current")
 def get_current_period() -> dict[str, Any]:
     with get_connection() as conn:
@@ -263,6 +318,8 @@ def confirm_period_trial_balance(period_id: int) -> dict[str, Any]:
     with get_connection() as conn:
         ensure_accounting_period(conn)
         period = get_period_row_by_id(conn, period_id)
+
+    ensure_period_is_ready_to_finalize(period)
 
     try:
         post_summary = post_approved_proposals(period["id"], DB_PATH)
@@ -305,6 +362,8 @@ def confirm_current_trial_balance() -> dict[str, Any]:
     with get_connection() as conn:
         ensure_accounting_period(conn)
         period = get_current_period_row(conn)
+
+    ensure_period_is_ready_to_finalize(period)
 
     try:
         post_summary = post_approved_proposals(period["id"], DB_PATH)
@@ -442,6 +501,7 @@ def confirm_current_period_closing_entries() -> dict[str, Any]:
 
     try:
         post_summary = post_closing_entries(period["id"], DB_PATH)
+        save_balance_sheet_snapshot(period["id"], period["period_end"], DB_PATH)
     except ValueError as error:
         raise HTTPException(
             status_code=400,
@@ -466,6 +526,7 @@ def confirm_period_closing_entries(period_id: int) -> dict[str, Any]:
 
     try:
         post_summary = post_closing_entries(period["id"], DB_PATH)
+        save_balance_sheet_snapshot(period["id"], period["period_end"], DB_PATH)
     except ValueError as error:
         raise HTTPException(
             status_code=400,
@@ -736,8 +797,18 @@ def get_accounts() -> list[dict[str, Any]]:
     ]
 
 
+@app.post("/api/agent/chat")
+def chat_with_accounting_agent(request: AgentChatRequest) -> AgentChatResponse:
+    try:
+        return run_agent_chat(request, DB_PATH)
+    except ValueError as error:
+        raise HTTPException(status_code=400, detail=str(error)) from error
+    except RuntimeError as error:
+        raise HTTPException(status_code=502, detail=str(error)) from error
+
+
 @app.post("/api/generate-csv/variable-costs")
-async def generate_variable_cost_csv(file: UploadFile = File(...)) -> StreamingResponse:
+async def generate_variable_cost_csv(file: UploadFile = File(...)) -> dict[str, Any]:
     filename = file.filename or ""
 
     if not filename.lower().endswith(".csv"):
@@ -755,11 +826,10 @@ async def generate_variable_cost_csv(file: UploadFile = File(...)) -> StreamingR
         )
 
     try:
-        rows = build_variable_cost_transaction_rows_from_content(
+        monthly_rows = build_monthly_variable_cost_transaction_rows_from_content(
             contents,
             VARIABLE_COST_CSV_PATH,
         )
-        csv_text = serialize_transaction_csv(rows)
     except UnicodeDecodeError as error:
         raise HTTPException(
             status_code=400,
@@ -771,17 +841,24 @@ async def generate_variable_cost_csv(file: UploadFile = File(...)) -> StreamingR
             detail=f"The variable-cost CSV could not be generated: {error}",
         ) from error
 
-    output_filename = build_variable_cost_output_filename(filename)
-    headers = {
-        "Content-Disposition": f'attachment; filename="{output_filename}"',
-        "X-Generated-Row-Count": str(len(rows)),
-    }
+    files = [
+        {
+            "monthKey": month_key,
+            "monthLabel": format_month_label(month_key),
+            "filename": build_variable_cost_output_filename(filename, month_key),
+            "rowCount": len(rows),
+            "csvText": serialize_transaction_csv(rows),
+        }
+        for month_key, rows in monthly_rows.items()
+        if rows
+    ]
 
-    return StreamingResponse(
-        iter([csv_text]),
-        media_type="text/csv; charset=utf-8",
-        headers=headers,
-    )
+    return {
+        "sourceFilename": filename,
+        "fileCount": len(files),
+        "totalRows": sum(file["rowCount"] for file in files),
+        "files": files,
+    }
 
 
 @app.post("/api/imports/etsy")
@@ -1714,6 +1791,35 @@ def get_period_row_by_id(conn: sqlite3.Connection, period_id: int) -> sqlite3.Ro
     return row
 
 
+def get_latest_closed_period_row(conn: sqlite3.Connection) -> sqlite3.Row:
+    row = conn.execute(
+        """
+        SELECT
+            id,
+            period_start,
+            period_end,
+            label,
+            status,
+            reviewed_at,
+            adjusted_at,
+            closed_at
+        FROM accounting_periods
+        WHERE status = 'closed'
+           OR closed_at IS NOT NULL
+        ORDER BY period_end DESC, id DESC
+        LIMIT 1
+        """
+    ).fetchone()
+
+    if row is None:
+        raise HTTPException(
+            status_code=404,
+            detail="No closed accounting period is available yet.",
+        )
+
+    return row
+
+
 def get_current_period_row(conn: sqlite3.Connection) -> sqlite3.Row:
     row = conn.execute(
         """
@@ -1757,7 +1863,26 @@ def format_period(row: sqlite3.Row) -> dict[str, Any]:
     }
 
 
-def build_variable_cost_output_filename(original_filename: str) -> str:
+def ensure_period_is_ready_to_finalize(period: sqlite3.Row) -> None:
+    period_end = date.fromisoformat(period["period_end"])
+    first_safe_date = period_end + timedelta(days=MIN_FINALIZATION_DELAY_DAYS)
+
+    if date.today() < first_safe_date:
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                f"{period['label']} should not be finalized yet. Etsy can delay "
+                f"CSV rows for up to {MIN_FINALIZATION_DELAY_DAYS} days after "
+                f"month end, so finalize this period on or after "
+                f"{first_safe_date.isoformat()}."
+            ),
+        )
+
+
+def build_variable_cost_output_filename(
+    original_filename: str,
+    month_key: str | None = None,
+) -> str:
     stem = Path(original_filename or "etsy_sold_order_items").stem
     safe_stem = "".join(
         character if character.isalnum() or character in ("-", "_") else "_"
@@ -1767,7 +1892,13 @@ def build_variable_cost_output_filename(original_filename: str) -> str:
     if not safe_stem:
         safe_stem = "etsy_sold_order_items"
 
-    return f"{safe_stem}_variable_cost_transactions.csv"
+    suffix = f"_{month_key.replace('-', '_')}" if month_key else ""
+    return f"{safe_stem}{suffix}_variable_cost_transactions.csv"
+
+
+def format_month_label(month_key: str) -> str:
+    year, month = month_key.split("-")
+    return f"{MONTH_NAMES_BY_NUMBER[int(month)]} {year}"
 
 
 def ensure_column(

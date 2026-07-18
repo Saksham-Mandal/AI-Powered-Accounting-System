@@ -1,9 +1,10 @@
 import { Fragment, useCallback, useEffect, useMemo, useRef, useState } from 'react'
-import type { ChangeEvent, CSSProperties, DragEvent, FormEvent } from 'react'
+import type { ChangeEvent, DragEvent, FormEvent } from 'react'
 import './App.css'
 
 type Page =
   | 'dashboard'
+  | 'agent'
   | 'imports'
   | 'transactions'
   | 'financial-statements'
@@ -108,6 +109,20 @@ type ApiBalanceSheet = {
     total_liabilities_and_equity: number
   }
   is_balanced: boolean
+}
+
+type ApiBalanceSheetSnapshot = {
+  id: number
+  periodId: number
+  periodLabel: string | null
+  asOfDate: string
+  totalAssets: number
+  totalLiabilities: number
+  totalEquity: number
+  totalLiabilitiesAndEquity: number
+  isBalanced: boolean
+  createdAt: string
+  statement: ApiBalanceSheet
 }
 
 type ImportResult = {
@@ -240,6 +255,44 @@ type GeneratedCsvDraftRow = {
   sourceId: string
 }
 
+type GeneratedCsvFile = {
+  monthKey: string
+  monthLabel: string
+  filename: string
+  rowCount: number
+  csvText: string
+}
+
+type GenerateCsvResponse = {
+  sourceFilename: string
+  fileCount: number
+  totalRows: number
+  files: GeneratedCsvFile[]
+}
+
+type AgentHighlight = {
+  label: string
+  value: string
+}
+
+type AgentToolCall = {
+  name: string
+  arguments: Record<string, unknown>
+  resultSummary: string | null
+}
+
+type AgentSource = {
+  label: string
+  tool: string
+}
+
+type AccountingAgentResponse = {
+  answer: string
+  highlights: AgentHighlight[]
+  sources: AgentSource[]
+  toolCalls: AgentToolCall[]
+}
+
 const money = new Intl.NumberFormat('en-US', {
   style: 'currency',
   currency: 'USD',
@@ -253,6 +306,7 @@ const longDate = new Intl.DateTimeFormat('en-US', {
 
 const navItems: { id: Page; label: string }[] = [
   { id: 'dashboard', label: 'Dashboard' },
+  { id: 'agent', label: 'AI Agent' },
   { id: 'income-summary', label: 'Income Summary' },
   { id: 'balance-sheet', label: 'Balance Sheet' },
   { id: 'ledger', label: 'Ledger' },
@@ -264,112 +318,6 @@ const periodNavItems: { id: Page; label: string }[] = [
   { id: 'financial-statements', label: 'Financial Statements' },
   { id: 'closing', label: 'Closing' },
   { id: 'post-closing-trial-balance', label: 'Post-Closing Trial Balance' },
-]
-
-const metrics: Metric[] = [
-  { label: 'Net income', value: '$149.79', helper: 'January 2026' },
-  { label: 'Sales revenue', value: '$271.78', helper: '10 Etsy sales' },
-  { label: 'Expenses', value: '$75.30', helper: 'Fees and shipping' },
-  { label: 'Etsy clearing', value: '$149.79', helper: 'Current debit balance' },
-]
-
-const journalEntries: JournalEntry[] = [
-  {
-    id: 1,
-    date: '2026-01-28',
-    memo: 'Sale - Payment for Order #3957331642',
-    source: 'Etsy',
-    debits: [
-      {
-        accountCode: '1010',
-        accountName: 'Etsy Clearing',
-        amount: 13.35,
-        memo: 'Sale - Payment for Order #3957331642',
-      },
-    ],
-    credits: [
-      {
-        accountCode: '4000',
-        accountName: 'Sales Revenue',
-        amount: 13.35,
-        memo: 'Sale - Payment for Order #3957331642',
-      },
-    ],
-    amount: 13.35,
-    status: 'Posted',
-  },
-  {
-    id: 2,
-    date: '2026-01-28',
-    memo: 'Fee - Processing fee - Order #3957331642',
-    source: 'Etsy',
-    debits: [
-      {
-        accountCode: '5100',
-        accountName: 'Etsy Fees Expense',
-        amount: 0.65,
-        memo: 'Fee - Processing fee - Order #3957331642',
-      },
-    ],
-    credits: [
-      {
-        accountCode: '1010',
-        accountName: 'Etsy Clearing',
-        amount: 0.65,
-        memo: 'Fee - Processing fee - Order #3957331642',
-      },
-    ],
-    amount: 0.65,
-    status: 'Posted',
-  },
-  {
-    id: 3,
-    date: '2026-01-28',
-    memo: 'Tax - Sales tax paid by buyer - Order #3957331642',
-    source: 'Etsy',
-    debits: [
-      {
-        accountCode: '2100',
-        accountName: 'Sales Tax Payable',
-        amount: 0.76,
-        memo: 'Tax - Sales tax paid by buyer - Order #3957331642',
-      },
-    ],
-    credits: [
-      {
-        accountCode: '1010',
-        accountName: 'Etsy Clearing',
-        amount: 0.76,
-        memo: 'Tax - Sales tax paid by buyer - Order #3957331642',
-      },
-    ],
-    amount: 0.76,
-    status: 'Posted',
-  },
-  {
-    id: 4,
-    date: '2026-01-30',
-    memo: 'Shipping - USPS shipping label - Label #298680157835',
-    source: 'Etsy',
-    debits: [
-      {
-        accountCode: '5200',
-        accountName: 'Shipping Expense',
-        amount: 5.3,
-        memo: 'Shipping - USPS shipping label - Label #298680157835',
-      },
-    ],
-    credits: [
-      {
-        accountCode: '1010',
-        accountName: 'Etsy Clearing',
-        amount: 5.3,
-        memo: 'Shipping - USPS shipping label - Label #298680157835',
-      },
-    ],
-    amount: 5.3,
-    status: 'Posted',
-  },
 ]
 
 function App() {
@@ -432,6 +380,12 @@ function App() {
     month: string
     year: string
   } | null>(null)
+  const [agentQuestion, setAgentQuestion] = useState('')
+  const [agentSubmittedQuestion, setAgentSubmittedQuestion] = useState('')
+  const [agentResponse, setAgentResponse] =
+    useState<AccountingAgentResponse | null>(null)
+  const [agentLoading, setAgentLoading] = useState(false)
+  const [agentError, setAgentError] = useState('')
 
   const pageTitle = useMemo(() => {
     return (
@@ -908,35 +862,33 @@ function App() {
   }, [loadIncomeStatementSnapshots])
 
   const loadBalanceSheet = useCallback(async () => {
-    if (!selectedPeriodId || !closingConfirmed) {
-      setBalanceSheet(null)
-      setBalanceSheetError('')
-      setBalanceSheetLoading(false)
-      return
-    }
-
     try {
       setBalanceSheetLoading(true)
       setBalanceSheetError('')
 
-      const response = await fetch(`/api/periods/${selectedPeriodId}/reports/balance-sheet`)
+      const response = await fetch('/api/reports/balance-sheet/latest')
 
-      if (!response.ok) {
-        throw new Error('Unable to load balance sheet from the API.')
+      if (response.status === 404) {
+        setBalanceSheet(null)
+        return
       }
 
-      const report = (await response.json()) as ApiBalanceSheet
-      setBalanceSheet(report)
+      if (!response.ok) {
+        throw new Error('Unable to load the saved balance sheet from the API.')
+      }
+
+      const snapshot = (await response.json()) as ApiBalanceSheetSnapshot
+      setBalanceSheet(snapshot.statement)
     } catch (error) {
       setBalanceSheetError(
         error instanceof Error
           ? error.message
-          : 'Unable to load balance sheet from the API.',
+          : 'Unable to load the saved balance sheet from the API.',
       )
     } finally {
       setBalanceSheetLoading(false)
     }
-  }, [closingConfirmed, selectedPeriodId])
+  }, [])
 
   useEffect(() => {
     loadBalanceSheet()
@@ -1050,7 +1002,8 @@ function App() {
       setTrialBalanceLines([])
       setPostClosingTrialBalanceLines([])
       setIncomeStatement(null)
-      setBalanceSheet(null)
+      setAgentResponse(null)
+      setAgentError('')
       setTransactionView('journal')
     } catch (error) {
       setPeriodError(
@@ -1226,6 +1179,49 @@ function App() {
     await Promise.all([loadTransactions(), loadTrialBalance()])
   }
 
+  async function askAccountingAgent(questionOverride?: string) {
+    const question = (questionOverride ?? agentQuestion).trim()
+
+    if (!question) {
+      setAgentError('Ask the agent a question first.')
+      return
+    }
+
+    try {
+      setAgentLoading(true)
+      setAgentError('')
+      setAgentQuestion(question)
+      setAgentSubmittedQuestion(question)
+      setAgentResponse(null)
+
+      const response = await fetch('/api/agent/chat', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({
+          message: question,
+          periodId: selectedPeriodId,
+        }),
+      })
+      const data = await response.json()
+
+      if (!response.ok) {
+        throw new Error(data.detail ?? 'Unable to ask the accounting agent.')
+      }
+
+      setAgentResponse(normalizeAgentResponse(data))
+    } catch (error) {
+      setAgentError(
+        error instanceof Error
+          ? error.message
+          : 'Unable to ask the accounting agent.',
+      )
+    } finally {
+      setAgentLoading(false)
+    }
+  }
+
   async function confirmClosingEntries() {
     if (!selectedPeriodId) {
       setClosingError('Confirm an accounting period before posting closing entries.')
@@ -1253,6 +1249,7 @@ function App() {
         loadClosingEntries(),
         loadLedger(),
         loadPostClosingTrialBalance(true),
+        loadBalanceSheet(),
         loadTrialBalance(),
         loadTransactions(),
       ])
@@ -1334,11 +1331,13 @@ function App() {
           </div>
           <div className="status-pill">
             <span></span>
-            {activePage === 'imports' ||
+            {activePage === 'dashboard' ||
+            activePage === 'imports' ||
             activePage === 'transactions' ||
             activePage === 'financial-statements' ||
             activePage === 'balance-sheet' ||
-            activePage === 'ledger'
+            activePage === 'ledger' ||
+            activePage === 'agent'
               ? 'Live API'
               : 'Mock data'}
           </div>
@@ -1357,7 +1356,7 @@ function App() {
               }
 
               if (page === 'financial-statements') {
-                return financialStatementsViewed
+                return trialBalanceConfirmed && financialStatementsViewed
               }
 
               if (page === 'closing') {
@@ -1365,7 +1364,7 @@ function App() {
               }
 
               if (page === 'post-closing-trial-balance') {
-                return postClosingTrialBalanceViewed
+                return closingConfirmed && postClosingTrialBalanceViewed
               }
 
               return false
@@ -1376,7 +1375,35 @@ function App() {
           />
         )}
 
-        {activePage === 'dashboard' && <DashboardPage />}
+        {activePage === 'dashboard' && (
+          <DashboardPage
+            currentPeriod={currentPeriod}
+            etsyRows={apiEtsyRows}
+            importHistory={importHistory}
+            importsLoading={importsLoading}
+            incomeError={incomeError}
+            incomeLoading={incomeLoading}
+            incomeReport={incomeStatement}
+            journalEntries={apiJournalEntries}
+            transactionsError={transactionsError}
+            transactionsLoading={transactionsLoading}
+            trialBalanceError={trialBalanceError}
+            trialBalanceLines={trialBalanceLines}
+            trialBalanceLoading={trialBalanceLoading}
+          />
+        )}
+        {activePage === 'agent' && (
+          <AgentPage
+            currentPeriodLabel={currentPeriodLabel}
+            error={agentError}
+            loading={agentLoading}
+            onAsk={askAccountingAgent}
+            question={agentQuestion}
+            response={agentResponse}
+            setQuestion={setAgentQuestion}
+            submittedQuestion={agentSubmittedQuestion}
+          />
+        )}
         {activePage === 'ledger' && (
           <LedgerPage
             error={ledgerError}
@@ -1387,7 +1414,7 @@ function App() {
         {activePage === 'generate-csv' && <GenerateCsvPage />}
         {activePage === 'balance-sheet' && (
           <StandaloneBalanceSheetPage
-            closed={closingConfirmed}
+            closed={Boolean(balanceSheet)}
             error={balanceSheetError}
             loading={balanceSheetLoading}
             report={balanceSheet}
@@ -1511,6 +1538,60 @@ function formatSource(source: string): string {
   return source ? source.charAt(0).toUpperCase() + source.slice(1) : source
 }
 
+function normalizeAgentResponse(data: unknown): AccountingAgentResponse {
+  const response = isRecord(data) ? data : {}
+
+  return {
+    answer: typeof response.answer === 'string' ? response.answer : '',
+    highlights: Array.isArray(response.highlights)
+      ? response.highlights.filter(isAgentHighlight)
+      : [],
+    sources: Array.isArray(response.sources)
+      ? response.sources.filter(isAgentSource)
+      : [],
+    toolCalls: Array.isArray(response.toolCalls)
+      ? response.toolCalls.filter(isAgentToolCall)
+      : [],
+  }
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === 'object' && value !== null
+}
+
+function isAgentHighlight(value: unknown): value is AgentHighlight {
+  return (
+    isRecord(value) &&
+    typeof value.label === 'string' &&
+    typeof value.value === 'string'
+  )
+}
+
+function isAgentSource(value: unknown): value is AgentSource {
+  return (
+    isRecord(value) &&
+    typeof value.label === 'string' &&
+    typeof value.tool === 'string'
+  )
+}
+
+function isAgentToolCall(value: unknown): value is AgentToolCall {
+  return (
+    isRecord(value) &&
+    typeof value.name === 'string' &&
+    isRecord(value.arguments) &&
+    (
+      typeof value.resultSummary === 'string' ||
+      value.resultSummary === null ||
+      value.resultSummary === undefined
+    )
+  )
+}
+
+function formatAgentSources(sources: AgentSource[]): string {
+  return sources.map((source) => source.label).join(', ')
+}
+
 function formatStatus(status: string, isFlagged = false): 'Posted' | 'Draft' | 'Flagged' {
   if (isFlagged) {
     return 'Flagged'
@@ -1540,6 +1621,43 @@ function formatReportDate(value: string): string {
   }
 
   return longDate.format(new Date(`${value}T12:00:00`))
+}
+
+function roundCurrency(value: number): number {
+  return Math.round(value * 100) / 100
+}
+
+function buildDashboardSummary(
+  periodLabel: string,
+  incomeReport: ApiIncomeStatement | null,
+  trialBalanced: boolean,
+  pendingEntries: number,
+  flaggedEntries: number,
+): string {
+  if (!incomeReport) {
+    return `Select or load an accounting period to see live dashboard results for ${periodLabel}.`
+  }
+
+  const netIncome = incomeReport.totals.net_income
+  const netRevenue = incomeReport.totals.net_revenue
+  const expenses = incomeReport.totals.total_expenses
+  const incomeDirection = netIncome >= 0 ? 'positive' : 'negative'
+  const reviewItems = [
+    pendingEntries ? `${pendingEntries} pending entr${pendingEntries === 1 ? 'y' : 'ies'}` : '',
+    flaggedEntries ? `${flaggedEntries} flagged entr${flaggedEntries === 1 ? 'y' : 'ies'}` : '',
+    trialBalanced ? '' : 'an out-of-balance trial balance',
+  ].filter(Boolean)
+
+  return (
+    `${periodLabel} currently shows ${incomeDirection} net income of ` +
+    `${money.format(netIncome)} on ${money.format(netRevenue)} of net revenue ` +
+    `and ${money.format(expenses)} of expenses. ` +
+    (
+      reviewItems.length
+        ? `Review ${reviewItems.join(', ')} before finalizing the period.`
+        : 'No pending, flagged, or trial-balance issues are showing in the dashboard data.'
+    )
+  )
 }
 
 function formatCompactDate(value: string): string {
@@ -1638,15 +1756,6 @@ async function detectImportCsvType(file: File): Promise<ImportCsvType | null> {
   }
 
   return null
-}
-
-function getResponseFilename(contentDisposition: string | null): string | null {
-  if (!contentDisposition) {
-    return null
-  }
-
-  const match = contentDisposition.match(/filename="?([^"]+)"?/)
-  return match?.[1] ?? null
 }
 
 function parseGeneratedTransactionCsv(csvText: string): GeneratedCsvDraftRow[] {
@@ -1939,6 +2048,141 @@ function buildIncomeStatementLines(report: ApiIncomeStatement): StatementLine[] 
   ]
 }
 
+function AgentPage({
+  currentPeriodLabel,
+  error,
+  loading,
+  onAsk,
+  question,
+  response,
+  setQuestion,
+  submittedQuestion,
+}: {
+  currentPeriodLabel: string
+  error: string
+  loading: boolean
+  onAsk: (questionOverride?: string) => Promise<void>
+  question: string
+  response: AccountingAgentResponse | null
+  setQuestion: (question: string) => void
+  submittedQuestion: string
+}) {
+  async function submitAgentQuestion(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault()
+    await onAsk()
+  }
+
+  return (
+    <section className="agent-chat-shell">
+      <article className="panel agent-chat-panel">
+        <header className="agent-chat-header">
+          <div>
+            <p className="eyebrow">Accounting agent</p>
+            <h3>{currentPeriodLabel}</h3>
+          </div>
+          <span className="tag positive">Read-only</span>
+        </header>
+
+        <div className="agent-chat-log" aria-live="polite">
+          <div className="agent-message-row assistant">
+            <div className="agent-avatar">AI</div>
+            <div className="agent-message">
+              <strong>Accounting assistant</strong>
+              <p>
+                Ask me about reports, transactions, closing readiness, or anything
+                you want this agent to eventually help with.
+              </p>
+            </div>
+          </div>
+
+          {submittedQuestion && (
+            <div className="agent-message-row user">
+              <div className="agent-message">
+                <p>{submittedQuestion}</p>
+              </div>
+            </div>
+          )}
+
+          {loading && (
+            <div className="agent-message-row assistant">
+              <div className="agent-avatar">AI</div>
+              <div className="agent-message thinking">
+                <span></span>
+                <span></span>
+                <span></span>
+              </div>
+            </div>
+          )}
+
+          {error && !loading && (
+            <div className="agent-message-row assistant">
+              <div className="agent-avatar">AI</div>
+              <div className="agent-message error">
+                <strong>Agent unavailable</strong>
+                <p>{error}</p>
+              </div>
+            </div>
+          )}
+
+          {response && !loading && !error && (
+            <div className="agent-message-row assistant">
+              <div className="agent-avatar">AI</div>
+              <div className="agent-message">
+                <strong>Accounting readout</strong>
+                <p>{response.answer}</p>
+
+                {response.highlights.length > 0 && (
+                  <div className="agent-highlight-grid">
+                    {response.highlights.map((highlight) => (
+                      <div className="agent-highlight" key={highlight.label}>
+                        <span>{highlight.label}</span>
+                        <strong>{highlight.value}</strong>
+                      </div>
+                    ))}
+                  </div>
+                )}
+
+                {response.toolCalls.length > 0 && (
+                  <div className="agent-action-list">
+                    <p className="eyebrow">Tools used</p>
+                    {response.toolCalls.map((toolCall) => (
+                      <div className="agent-action" key={`${toolCall.name}-${toolCall.resultSummary}`}>
+                        <strong>{toolCall.name}</strong>
+                        {toolCall.resultSummary ? (
+                          <span>{toolCall.resultSummary}</span>
+                        ) : null}
+                      </div>
+                    ))}
+                  </div>
+                )}
+
+                {response.sources.length > 0 && (
+                  <p className="agent-sources">
+                    Sources: {formatAgentSources(response.sources)}
+                  </p>
+                )}
+
+              </div>
+            </div>
+          )}
+        </div>
+
+        <form className="agent-chat-form" onSubmit={submitAgentQuestion}>
+          <textarea
+            aria-label="Message the accounting agent"
+            onChange={(event) => setQuestion(event.target.value)}
+            placeholder="Message the accounting agent..."
+            value={question}
+          ></textarea>
+          <button disabled={loading || !question.trim()} type="submit">
+            Send
+          </button>
+        </form>
+      </article>
+    </section>
+  )
+}
+
 function PeriodProgress({
   activeStep,
   isStepComplete = () => false,
@@ -1952,22 +2196,20 @@ function PeriodProgress({
   items: { id: Page; label: string }[]
   setActivePage: (page: Page) => void
 }) {
-  const completedProgressStep = items.reduce((furthestStep, item, index) => {
-    if (!isStepComplete(item.id)) {
-      return furthestStep
-    }
-
-    return Math.max(furthestStep, Math.min(index + 1, items.length - 1))
-  }, 0)
-  const progressWidth =
-    items.length > 1
-      ? `${(completedProgressStep / (items.length - 1)) * 100}%`
-      : '0%'
-
   return (
     <section className="period-progress" aria-label="Period process progress">
       <div className="period-progress-track">
-        <span style={{ width: progressWidth } as CSSProperties}></span>
+        <div
+          className="period-progress-segments"
+          style={{ gridTemplateColumns: `repeat(${items.length - 1}, minmax(0, 1fr))` }}
+        >
+          {items.slice(0, -1).map((item) => (
+            <span
+              className={isStepComplete(item.id) ? 'complete' : ''}
+              key={item.id}
+            ></span>
+          ))}
+        </div>
       </div>
       <div className="period-progress-steps">
         {items.map((item, index) => {
@@ -2019,7 +2261,102 @@ function LockedProcessPage({
   )
 }
 
-function DashboardPage() {
+function DashboardPage({
+  currentPeriod,
+  etsyRows,
+  importHistory,
+  importsLoading,
+  incomeError,
+  incomeLoading,
+  incomeReport,
+  journalEntries,
+  transactionsError,
+  transactionsLoading,
+  trialBalanceError,
+  trialBalanceLines,
+  trialBalanceLoading,
+}: {
+  currentPeriod: AccountingPeriod | null
+  etsyRows: EtsyRow[]
+  importHistory: ImportHistoryRow[]
+  importsLoading: boolean
+  incomeError: string
+  incomeLoading: boolean
+  incomeReport: ApiIncomeStatement | null
+  journalEntries: JournalEntry[]
+  transactionsError: string
+  transactionsLoading: boolean
+  trialBalanceError: string
+  trialBalanceLines: TrialBalanceLine[]
+  trialBalanceLoading: boolean
+}) {
+  const trialDebitTotal = trialBalanceLines.reduce(
+    (total, line) => total + line.debitBalance,
+    0,
+  )
+  const trialCreditTotal = trialBalanceLines.reduce(
+    (total, line) => total + line.creditBalance,
+    0,
+  )
+  const trialBalanced =
+    trialBalanceLines.length > 0 &&
+    roundCurrency(trialDebitTotal) === roundCurrency(trialCreditTotal)
+  const periodLabel = currentPeriod?.label ?? 'No period selected'
+  const importedRows = importHistory.reduce(
+    (total, row) => total + row.storedRows,
+    0,
+  )
+  const pendingEntries = journalEntries.filter((entry) => entry.status === 'Draft').length
+  const flaggedEntries = journalEntries.filter((entry) => entry.status === 'Flagged').length
+  const topExpenses = [...(incomeReport?.sections.expenses ?? [])]
+    .sort((first, second) => Math.abs(second.amount) - Math.abs(first.amount))
+    .slice(0, 4)
+  const maxExpense = Math.max(
+    ...topExpenses.map((line) => Math.abs(line.amount)),
+    0,
+  )
+  const metrics: Metric[] = [
+    {
+      label: 'Net income',
+      value: incomeReport ? money.format(incomeReport.totals.net_income) : '-',
+      helper: incomeLoading ? 'Loading income statement' : periodLabel,
+    },
+    {
+      label: 'Net revenue',
+      value: incomeReport ? money.format(incomeReport.totals.net_revenue) : '-',
+      helper: incomeReport
+        ? `${incomeReport.sections.revenue.length} revenue account${incomeReport.sections.revenue.length === 1 ? '' : 's'}`
+        : 'Waiting for report data',
+    },
+    {
+      label: 'Expenses',
+      value: incomeReport ? money.format(incomeReport.totals.total_expenses) : '-',
+      helper: incomeReport
+        ? `${incomeReport.sections.expenses.length} expense account${incomeReport.sections.expenses.length === 1 ? '' : 's'}`
+        : 'Waiting for report data',
+    },
+    {
+      label: 'Trial balance',
+      value: trialBalanceLoading
+        ? 'Loading'
+        : trialBalanceLines.length
+          ? trialBalanced
+            ? 'Balanced'
+            : 'Review'
+          : '-',
+      helper: trialBalanceLines.length
+        ? `${money.format(trialDebitTotal)} debit / ${money.format(trialCreditTotal)} credit`
+        : 'Waiting for balances',
+    },
+  ]
+  const summaryText = buildDashboardSummary(
+    periodLabel,
+    incomeReport,
+    trialBalanced,
+    pendingEntries,
+    flaggedEntries,
+  )
+
   return (
     <>
       <section className="metrics-grid" aria-label="Monthly metrics">
@@ -2029,19 +2366,22 @@ function DashboardPage() {
       </section>
 
       <section className="content-grid">
-        <article className="panel wide">
+        <article className="panel wide dashboard-summary-panel">
           <div className="panel-heading">
             <div>
               <p className="eyebrow">Summary</p>
-              <h3>January performance</h3>
+              <h3>{periodLabel}</h3>
             </div>
           </div>
-          <p className="summary-text">
-            EZPrntz posted positive income for January. Sales revenue was driven
-            by 10 Etsy orders, while Etsy fees and shipping labels were the main
-            costs. The next useful review is the uncategorized adjustment from
-            the refund-related payment row.
-          </p>
+          {incomeError || trialBalanceError ? (
+            <StatusState
+              title="Dashboard data unavailable"
+              text={incomeError || trialBalanceError}
+              tone="error"
+            />
+          ) : (
+            <p className="summary-text">{summaryText}</p>
+          )}
         </article>
 
         <article className="panel">
@@ -2051,10 +2391,28 @@ function DashboardPage() {
               <h3>Cost pressure</h3>
             </div>
           </div>
-          <div className="bars">
-            <BarRow label="Shipping" amount={49.79} max={75.3} />
-            <BarRow label="Etsy fees" amount={25.51} max={75.3} />
-          </div>
+          {incomeLoading ? (
+            <StatusState
+              title="Loading expenses"
+              text="Reading income statement lines from the backend."
+            />
+          ) : topExpenses.length ? (
+            <div className="bars">
+              {topExpenses.map((line) => (
+                <BarRow
+                  amount={Math.abs(line.amount)}
+                  key={line.account_code}
+                  label={line.account_name}
+                  max={maxExpense}
+                />
+              ))}
+            </div>
+          ) : (
+            <StatusState
+              title="No expenses"
+              text="No expense account balances are present for this period."
+            />
+          )}
         </article>
 
         <article className="panel">
@@ -2065,21 +2423,53 @@ function DashboardPage() {
             </div>
           </div>
           <div className="stat-list">
-            <StatRow label="Raw Etsy rows" value="78" />
-            <StatRow label="Posted rows" value="78" />
-            <StatRow label="Journal entries" value="74" />
-            <StatRow label="Unbalanced entries" value="0" />
+            <StatRow
+              label="CSV imports"
+              value={importsLoading ? 'Loading' : String(importHistory.length)}
+            />
+            <StatRow
+              label="Imported rows"
+              value={importsLoading ? 'Loading' : String(importedRows)}
+            />
+            <StatRow
+              label="Raw Etsy rows"
+              value={transactionsLoading ? 'Loading' : String(etsyRows.length)}
+            />
+            <StatRow
+              label="Journal entries"
+              value={transactionsLoading ? 'Loading' : String(journalEntries.length)}
+            />
+            <StatRow label="Pending entries" value={String(pendingEntries)} />
+            <StatRow label="Flagged entries" value={String(flaggedEntries)} />
           </div>
         </article>
 
-        <article className="panel wide">
+        <article className="panel wide dashboard-journal-panel">
           <div className="panel-heading">
             <div>
               <p className="eyebrow">Recent journal entries</p>
               <h3>Accounting activity</h3>
             </div>
           </div>
-          <JournalTable rows={journalEntries.slice(0, 3)} />
+          {transactionsError ? (
+            <StatusState
+              title="Transactions unavailable"
+              text={transactionsError}
+              tone="error"
+            />
+          ) : transactionsLoading ? (
+            <StatusState
+              title="Loading journal entries"
+              text="Reading proposed entries for the selected period."
+            />
+          ) : journalEntries.length ? (
+            <JournalTable rows={journalEntries.slice(0, 5)} />
+          ) : (
+            <StatusState
+              title="No journal entries"
+              text="Import transactions to populate dashboard activity."
+            />
+          )}
         </article>
       </section>
     </>
@@ -2225,14 +2615,20 @@ function LedgerPage({
 
 function GenerateCsvPage() {
   const fileInputRef = useRef<HTMLInputElement>(null)
-  const [generatedCsvRows, setGeneratedCsvRows] = useState<GeneratedCsvDraftRow[]>([])
-  const [generatedCsvText, setGeneratedCsvText] = useState('')
-  const [generatedCsvFilename, setGeneratedCsvFilename] = useState('')
+  const [generatedCsvFiles, setGeneratedCsvFiles] = useState<GeneratedCsvFile[]>([])
+  const [selectedGeneratedMonth, setSelectedGeneratedMonth] = useState('')
   const [generateCsvUploading, setGenerateCsvUploading] = useState(false)
   const [generateCsvError, setGenerateCsvError] = useState('')
   const [recentGeneratedImports, setRecentGeneratedImports] = useState<
-    { filename: string; status: string }[]
+    { filename: string; status: string; detail: string }[]
   >([])
+  const selectedGeneratedFile =
+    generatedCsvFiles.find((file) => file.monthKey === selectedGeneratedMonth) ??
+    generatedCsvFiles[0] ??
+    null
+  const generatedCsvRows = selectedGeneratedFile
+    ? parseGeneratedTransactionCsv(selectedGeneratedFile.csvText)
+    : []
 
   async function handleGenerateCsvFile(file: File) {
     setGenerateCsvUploading(true)
@@ -2252,15 +2648,17 @@ function GenerateCsvPage() {
         throw new Error(parseApiErrorText(text))
       }
 
-      const filename =
-        getResponseFilename(response.headers.get('content-disposition')) ||
-        'generated_variable_cost_transactions.csv'
+      const data = JSON.parse(text) as GenerateCsvResponse
+      const files = data.files ?? []
 
-      setGeneratedCsvText(text)
-      setGeneratedCsvFilename(filename)
-      setGeneratedCsvRows(parseGeneratedTransactionCsv(text))
+      setGeneratedCsvFiles(files)
+      setSelectedGeneratedMonth(files[0]?.monthKey ?? '')
       setRecentGeneratedImports((imports) => [
-        { filename: file.name, status: 'Imported' },
+        {
+          filename: file.name,
+          status: 'Generated',
+          detail: `${data.fileCount} monthly CSV${data.fileCount === 1 ? '' : 's'} / ${data.totalRows} rows`,
+        },
         ...imports.filter((row) => row.filename !== file.name),
       ])
     } catch (error) {
@@ -2294,16 +2692,16 @@ function GenerateCsvPage() {
     }
   }
 
-  function downloadGeneratedCsv() {
-    if (!generatedCsvText) {
+  function downloadGeneratedCsv(file: GeneratedCsvFile | null) {
+    if (!file) {
       return
     }
 
-    const blob = new Blob([generatedCsvText], { type: 'text/csv;charset=utf-8' })
+    const blob = new Blob([file.csvText], { type: 'text/csv;charset=utf-8' })
     const url = URL.createObjectURL(blob)
     const link = document.createElement('a')
     link.href = url
-    link.download = generatedCsvFilename || 'generated_variable_cost_transactions.csv'
+    link.download = file.filename
     link.click()
     URL.revokeObjectURL(url)
   }
@@ -2375,7 +2773,10 @@ function GenerateCsvPage() {
                     recentGeneratedImports.map((row) => (
                       <tr key={row.filename}>
                         <td>{row.filename}</td>
-                        <td><span className="tag positive">{row.status}</span></td>
+                        <td>
+                          <span className="tag positive">{row.status}</span>
+                          <span className="table-note">{row.detail}</span>
+                        </td>
                       </tr>
                     ))
                   ) : (
@@ -2398,6 +2799,18 @@ function GenerateCsvPage() {
             <h3>Draft rows</h3>
           </div>
           <div className="csv-action-group">
+            {generatedCsvFiles.length > 1 && (
+              <select
+                onChange={(event) => setSelectedGeneratedMonth(event.target.value)}
+                value={selectedGeneratedFile?.monthKey ?? ''}
+              >
+                {generatedCsvFiles.map((file) => (
+                  <option key={file.monthKey} value={file.monthKey}>
+                    {file.monthLabel}
+                  </option>
+                ))}
+              </select>
+            )}
             <button className="csv-secondary-button" type="button">Clear draft</button>
             <button className="csv-primary-button" type="button">Confirm rows</button>
           </div>
@@ -2422,7 +2835,7 @@ function GenerateCsvPage() {
             <div>
               <span>-</span>
               <span>-</span>
-              <span>Upload an Etsy order-items CSV to generate draft rows.</span>
+              <span>Upload an Etsy order-items CSV to generate monthly draft rows.</span>
               <strong>-</strong>
             </div>
           )}
@@ -2435,22 +2848,45 @@ function GenerateCsvPage() {
             <p className="eyebrow">Output</p>
             <h3>Generated file preview</h3>
           </div>
-          <span className="tag positive">Transaction CSV</span>
+          <span className="tag positive">
+            {generatedCsvFiles.length
+              ? `${generatedCsvFiles.length} monthly CSV${generatedCsvFiles.length === 1 ? '' : 's'}`
+              : 'Transaction CSV'}
+          </span>
         </div>
-        <div className="csv-output-card">
-          <div>
-            <strong>{generatedCsvFilename || 'generated_transactions.csv'}</strong>
-            <p>Date, Type, Memo, Amount, Debit Account, Credit Account</p>
+        {generatedCsvFiles.length ? (
+          <div className="generated-files-list">
+            {generatedCsvFiles.map((file) => (
+              <div className="csv-output-card" key={file.monthKey}>
+                <div>
+                  <strong>{file.monthLabel}</strong>
+                  <p>{file.filename} / {file.rowCount} rows</p>
+                </div>
+                <button
+                  className="csv-primary-button"
+                  onClick={() => downloadGeneratedCsv(file)}
+                  type="button"
+                >
+                  Download CSV
+                </button>
+              </div>
+            ))}
           </div>
-          <button
-            className="csv-primary-button"
-            disabled={!generatedCsvText}
-            onClick={downloadGeneratedCsv}
-            type="button"
-          >
-            Download CSV
-          </button>
-        </div>
+        ) : (
+          <div className="csv-output-card">
+            <div>
+              <strong>generated_transactions.csv</strong>
+              <p>Date, Type, Memo, Amount, Debit Account, Credit Account</p>
+            </div>
+            <button
+              className="csv-primary-button"
+              disabled
+              type="button"
+            >
+              Download CSV
+            </button>
+          </div>
+        )}
       </article>
 
     </section>
@@ -2468,33 +2904,16 @@ function StandaloneBalanceSheetPage({
   loading: boolean
   report: ApiBalanceSheet | null
 }) {
-  const zeroSections: BalanceSection[] = [
-    {
-      title: 'Assets',
-      lines: [
-        { label: 'Cash', amount: 0 },
-        { label: 'Etsy Clearing', amount: 0 },
-        { label: 'Accounts Receivable', amount: 0 },
-        { label: 'Materials', amount: 0 },
-        { label: 'Supplies', amount: 0 },
-        { label: 'Total assets', amount: 0, kind: 'total' },
-      ],
-    },
-    {
-      title: 'Liabilities',
-      lines: [
-        { label: 'Accounts Payable', amount: 0 },
-        { label: 'Total liabilities', amount: 0, kind: 'subtotal' },
-      ],
-    },
-    {
-      title: 'Equity',
-      lines: [
-        { label: 'Capital', amount: 0 },
-        { label: 'Total equity', amount: 0, kind: 'subtotal' },
-      ],
-    },
-  ]
+  if (!loading && !error && !report) {
+    return (
+      <LockedProcessPage
+        loading={false}
+        title="Balance sheet locked"
+        text="Finish closing entries and generate the post-closing trial balance to unlock the finalized balance sheet."
+      />
+    )
+  }
+
   const sections: BalanceSection[] = report
     ? [
         {
@@ -2531,10 +2950,10 @@ function StandaloneBalanceSheetPage({
           ],
         },
       ]
-    : zeroSections
+    : []
   const asOfLabel = report
     ? `As of ${formatReportDate(report.as_of_date)}`
-    : 'As of January 31, 2026'
+    : 'Waiting for post-closing balances'
   const totalAssets = report?.totals.total_assets ?? 0
   const totalLiabilitiesAndEquity =
     report?.totals.total_liabilities_and_equity ?? 0
@@ -3078,8 +3497,8 @@ function ClosingPage({
             />
           ) : entries.length === 0 ? (
             <StatusState
-              text="Confirm the unadjusted trial balance to automatically prepare closing entries."
-              title="No closing entries prepared"
+              text="There are no temporary account balances to close for this period."
+              title="No closing entries needed"
             />
           ) : (
             <ProposedJournalTable
@@ -3100,10 +3519,12 @@ function ClosingPage({
         <p className="summary-text small">
           {confirmed
             ? 'Closing entries have been posted to the permanent ledger.'
-            : 'Confirming will post these closing entries to the permanent ledger and close the accounting period.'}
+            : entries.length === 0
+              ? 'Confirming will close this accounting period without posting closing entries.'
+              : 'Confirming will post these closing entries to the permanent ledger and close the accounting period.'}
         </p>
         <button
-          disabled={confirmed || generating || entries.length === 0}
+          disabled={confirmed || generating}
           onClick={() => {
             void onConfirmClosingEntries()
           }}
@@ -3197,7 +3618,6 @@ function TransactionsPage({
   const [manualCreditAccount, setManualCreditAccount] = useState('')
   const [manualCreditAmount, setManualCreditAmount] = useState('')
   const [manualSubmitting, setManualSubmitting] = useState(false)
-  const [manualMessage, setManualMessage] = useState('')
   const [manualError, setManualError] = useState('')
   const [voidTransactionId, setVoidTransactionId] = useState('')
   const [voidReason, setVoidReason] = useState('Entered by mistake')
@@ -3222,7 +3642,6 @@ function TransactionsPage({
   ) {
     event.preventDefault()
     setManualError('')
-    setManualMessage('')
 
     const debit = Number(manualDebitAmount)
     const credit = Number(manualCreditAmount)
@@ -3264,7 +3683,6 @@ function TransactionsPage({
       setManualMemo('')
       setManualDebitAmount('')
       setManualCreditAmount('')
-      setManualMessage('Draft transaction added.')
     } catch (error) {
       setManualError(
         error instanceof Error
@@ -3402,11 +3820,7 @@ function TransactionsPage({
                 value={manualCreditAmount}
               />
             </label>
-            {(manualError || manualMessage) && (
-              <p className={manualError ? 'form-message error' : 'form-message'}>
-                {manualError || manualMessage}
-              </p>
-            )}
+            {manualError && <p className="form-message error">{manualError}</p>}
             <button disabled={manualSubmitting || accounts.length === 0} type="submit">
               {manualSubmitting ? 'Adding draft...' : 'Add draft'}
             </button>

@@ -65,6 +65,20 @@ def build_variable_cost_transaction_rows_from_content(
     return build_variable_cost_transaction_rows_from_items(sold_items, cost_table)
 
 
+def build_monthly_variable_cost_transaction_rows_from_content(
+    sold_order_items_content: bytes,
+    variable_cost_csv: str | Path,
+) -> dict[str, list[GeneratedTransactionRow]]:
+    cost_table = read_variable_cost_table(variable_cost_csv)
+    sold_items = read_sold_order_items_content(sold_order_items_content)
+    grouped_items = group_sold_items_by_month(sold_items)
+
+    return {
+        month_key: build_variable_cost_transaction_rows_from_items(items, cost_table)
+        for month_key, items in sorted(grouped_items.items())
+    }
+
+
 def build_variable_cost_transaction_rows_from_items(
     sold_items: list[SoldOrderItem],
     cost_table: dict[str, VariableCost],
@@ -72,7 +86,7 @@ def build_variable_cost_transaction_rows_from_items(
     rows: list[GeneratedTransactionRow] = []
 
     for item in sold_items:
-        product_type = classify_product_type(item.variations)
+        product_type = classify_product_type(item.variations, item.item_name)
         cost = cost_table.get(product_type)
 
         if cost is None:
@@ -107,6 +121,18 @@ def build_variable_cost_transaction_rows_from_items(
             )
 
     return rows
+
+
+def group_sold_items_by_month(
+    sold_items: list[SoldOrderItem],
+) -> dict[str, list[SoldOrderItem]]:
+    grouped_items: dict[str, list[SoldOrderItem]] = {}
+
+    for item in sold_items:
+        month_key = item.sale_date[:7]
+        grouped_items.setdefault(month_key, []).append(item)
+
+    return grouped_items
 
 
 def build_variable_cost_transaction_row(
@@ -246,10 +272,10 @@ def read_sold_order_items_rows(file) -> list[SoldOrderItem]:
     ]
 
 
-def classify_product_type(variations: str) -> str:
-    normalized = normalize_variation_text(variations)
+def classify_product_type(variations: str, item_name: str = "") -> str:
+    normalized = normalize_variation_text(f"{variations} {item_name}")
 
-    if "digital download" in normalized:
+    if "digital download" in normalized or "digital" in normalized:
         return "Digital Download"
 
     size_match = re.search(r"(\d+)\s*x\s*(\d+)", normalized)

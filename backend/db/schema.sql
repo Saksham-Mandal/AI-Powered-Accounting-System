@@ -1,3 +1,5 @@
+DROP TABLE IF EXISTS balance_sheet_snapshot_lines;
+DROP TABLE IF EXISTS balance_sheet_snapshots;
 DROP TABLE IF EXISTS income_statement_snapshots;
 DROP TABLE IF EXISTS closing_batches;
 DROP TABLE IF EXISTS proposed_journal_lines;
@@ -283,6 +285,48 @@ CREATE TABLE income_statement_snapshots (
 
 CREATE UNIQUE INDEX idx_income_statement_snapshots_period
 ON income_statement_snapshots(period_id);
+
+CREATE TABLE balance_sheet_snapshots (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    period_id INTEGER NOT NULL,
+    as_of_date TEXT NOT NULL,
+    total_assets REAL NOT NULL DEFAULT 0,
+    total_liabilities REAL NOT NULL DEFAULT 0,
+    total_equity REAL NOT NULL DEFAULT 0,
+    total_liabilities_and_equity REAL NOT NULL DEFAULT 0,
+    is_balanced INTEGER NOT NULL DEFAULT 0,
+    statement_json TEXT NOT NULL,
+    created_at TEXT DEFAULT CURRENT_TIMESTAMP,
+    FOREIGN KEY (period_id) REFERENCES accounting_periods(id)
+);
+
+CREATE UNIQUE INDEX idx_balance_sheet_snapshots_period
+ON balance_sheet_snapshots(period_id);
+
+CREATE INDEX idx_balance_sheet_snapshots_as_of_date
+ON balance_sheet_snapshots(as_of_date);
+
+CREATE TABLE balance_sheet_snapshot_lines (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    snapshot_id INTEGER NOT NULL,
+    account_id INTEGER NOT NULL,
+    account_code TEXT NOT NULL,
+    account_name TEXT NOT NULL,
+    account_type TEXT NOT NULL,
+    section TEXT NOT NULL,
+    normal_balance TEXT NOT NULL,
+    amount REAL NOT NULL DEFAULT 0,
+    line_order INTEGER NOT NULL DEFAULT 0,
+    created_at TEXT DEFAULT CURRENT_TIMESTAMP,
+    FOREIGN KEY (snapshot_id) REFERENCES balance_sheet_snapshots(id),
+    FOREIGN KEY (account_id) REFERENCES accounts(id)
+);
+
+CREATE INDEX idx_balance_sheet_snapshot_lines_snapshot
+ON balance_sheet_snapshot_lines(snapshot_id);
+
+CREATE INDEX idx_balance_sheet_snapshot_lines_account
+ON balance_sheet_snapshot_lines(account_id);
 
 CREATE TABLE manual_expenses (
     id INTEGER PRIMARY KEY AUTOINCREMENT,

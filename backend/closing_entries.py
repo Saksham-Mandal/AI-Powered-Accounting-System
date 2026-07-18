@@ -191,17 +191,7 @@ def post_closing_entries(
                 (batch_id,),
             )
 
-        if posted:
-            conn.execute(
-                """
-                UPDATE accounting_periods
-                SET status = 'closed',
-                    closing_confirmed_at = COALESCE(closing_confirmed_at, CURRENT_TIMESTAMP),
-                    closed_at = COALESCE(closed_at, CURRENT_TIMESTAMP)
-                WHERE id = ?
-                """,
-                (period_id,),
-            )
+        mark_period_closed(conn, period_id)
 
     return LedgerPostSummary(
         posted=posted,
@@ -227,6 +217,19 @@ def get_postable_closing_proposals(
         """,
         (period_id,),
     ).fetchall()
+
+
+def mark_period_closed(conn: sqlite3.Connection, period_id: int) -> None:
+    conn.execute(
+        """
+        UPDATE accounting_periods
+        SET status = 'closed',
+            closing_confirmed_at = COALESCE(closing_confirmed_at, CURRENT_TIMESTAMP),
+            closed_at = COALESCE(closed_at, CURRENT_TIMESTAMP)
+        WHERE id = ?
+        """,
+        (period_id,),
+    )
 
 
 def ensure_closing_tables(conn: sqlite3.Connection) -> None:
@@ -457,29 +460,46 @@ def build_expense_closing_lines(
             continue
 
         amount = round(float(account["debits"] or 0) - float(account["credits"] or 0), 2)
-        if amount <= 0:
+        if amount == 0:
             continue
 
-        account_lines.append(
-            JournalLine(
-                account["account_code"],
-                credit=amount,
-                memo="Close expense account",
+        if amount > 0:
+            account_lines.append(
+                JournalLine(
+                    account["account_code"],
+                    credit=amount,
+                    memo="Close expense account",
+                )
             )
-        )
+        else:
+            account_lines.append(
+                JournalLine(
+                    account["account_code"],
+                    debit=abs(amount),
+                    memo="Close negative expense account",
+                )
+            )
         total = round(total + amount, 2)
 
-    if not total:
+    if not account_lines:
         return [], 0.0
 
-    return [
-        JournalLine(
+    if total > 0:
+        income_summary_line = JournalLine(
             INCOME_SUMMARY,
             debit=total,
             memo="Close expenses to Income Summary",
-        ),
-        *account_lines,
-    ], total
+        )
+    elif total < 0:
+        income_summary_line = JournalLine(
+            INCOME_SUMMARY,
+            credit=abs(total),
+            memo="Close negative expenses to Income Summary",
+        )
+    else:
+        return account_lines, 0.0
+
+    return [income_summary_line, *account_lines], total
 
 
 def build_income_summary_closing_lines(net_income: float) -> list[JournalLine]:
